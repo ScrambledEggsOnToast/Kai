@@ -1,7 +1,9 @@
 {
-{-# LANGUAGE MultiParamTypeClasses, OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -fno-warn-tabs -funbox-strict-fields #-}
-module KaiLex where
+module Kai.Lex where
+
+import Kai.LP
 
 import Control.Monad.State
 import Control.Monad.Except
@@ -39,10 +41,10 @@ $symchar   = [$symbol]
 $nl        = [\n\r]
 $horizontalwhite = $white # $nl
 
-@newpar = $nl ($horizontalwhite* $nl)+
+@newpar = ($horizontalwhite* $nl){2} $horizontalwhite*
 
 @reservedid =
-    class|import|function|return|for|in|if|then|else|break|continue|true|false|print
+    class|import|function|return|for|in|if|then|else|break|continue|print
 
 @scriptop =
     "+"|"-"|"*"|"/"|"="|"+="|"-="|"*="|"/="|"=="|"^"|".."
@@ -83,26 +85,29 @@ kai :-
 <typing_sc, script_sc>      \}                              { ascend (mkTBS TSpecial) }
 
 <script_sc>                 @reservedid                     { mkTBS TReservedId }
-<script_sc>                 $nl                             { mkT TNewLine }
+<script_sc>                 ($horizontalwhite* $nl)+ 
+                                $horizontalwhite*           { mkT TNewLine }
 <script_sc, struct_sc,
-    parenP_sc, parenB_sc>   $special                        { mkTBS TSpecial }
+    paren_sc>               $special                        { mkTBS TSpecial }
 <script_sc, struct_sc,
-    parenP_sc, parenB_sc>   @varid                          { mkTBS TVarId }
+    paren_sc>               @varid                          { mkTBS TVarId }
 <script_sc, struct_sc,
-    parenP_sc, parenB_sc>   @scriptop                       { mkTBS TReservedOp }
+    paren_sc>               @scriptop                       { mkTBS TReservedOp }
 <script_sc, struct_sc, 
-    parenP_sc, parenB_sc>   @decimal                        { mkTInteger }
+    paren_sc>               @decimal                        { mkTInteger }
 <script_sc, struct_sc, 
-    parenP_sc, parenB_sc>   @decimal \. @decimal @exponent? 
+    paren_sc>               @decimal \. @decimal @exponent? 
                                 | @decimal @exponent        { mkTFloat }
 <script_sc, struct_sc,
-    parenP_sc, parenB_sc>   \" @string* \"                  { mkTBS (TString . C8.pack . read . C8.unpack) }
+    paren_sc>               "true" | "false"                { mkTBool }
 <script_sc, struct_sc,
-    parenP_sc, parenB_sc>   $horizontalwhite+               { skip }
+    paren_sc>               \" @string* \"                  { mkTBS (TString . C8.pack . read . C8.unpack) }
 <script_sc, struct_sc,
-    parenP_sc, parenB_sc>   \(                              { descend parenP_sc (mkTBS TSpecial) }
+    paren_sc>               $horizontalwhite+               { skip }
 <script_sc, struct_sc,
-    parenP_sc, parenB_sc>   \[                              { descend typing_sc (mkTBS TSpecial) }
+    paren_sc>               \(                              { descend paren_sc (mkTBS TSpecial) }
+<script_sc, struct_sc,
+    paren_sc>               \[                              { descend typing_sc (mkTBS TSpecial) }
 
 <typing_sc>                 $horizontalwhite+  
                                 | $horizontalwhite* $nl 
@@ -115,7 +120,7 @@ kai :-
 <typing_sc, math_sc>        @varid / \(                     { descend paren_sc' (mkTBS TVarId) }
 <typing_sc, math_sc>        @varid / \[                     { descend paren_sc' (mkTBS TVarId) }
 
-<paren_sc'>                 \(                              { descend parenP_sc (mkTBS TSpecial) }
+<paren_sc'>                 \(                              { descend paren_sc (mkTBS TSpecial) }
 <paren_sc'>                 \[                              { descend typing_sc (mkTBS TSpecial) }
 <paren_sc'>                 $horizontalwhite+  | $nl        { ascend $ mkT TSpace }
 <paren_sc'>                 @newpar                         { ascend $ mkT TNewPar }
@@ -125,12 +130,12 @@ kai :-
 <paren_sc'>                 @varid / \[                     { mkTBS TVarId }
 <paren_sc'>                 \]                              { ascend (ascend (mkTBS TSpecial)) }
 
-<parenP_sc>                 \)                              { ascend (mkTBS TSpecial) }
+<paren_sc>                  \)                              { ascend (mkTBS TSpecial) }
 <typing_sc>                 \]                              { ascend (mkTBS TSpecial) }
 
-<parenP_sc, struct_sc>      \{                              { descend struct_sc (mkTBS TSpecial) }
+<paren_sc, struct_sc>       \{                              { descend struct_sc (mkTBS TSpecial) }
 <struct_sc>                 \}                              { ascend (mkTBS TSpecial) }
-<parenP_sc, struct_sc>      $nl                             { skip }
+<paren_sc, struct_sc>       $nl                             { skip }
 
 <math_sc>                   $nl                             { mkT TNewLine }
 <math_sc>                   @mathop                         { mkTBS TReservedOp }
@@ -145,86 +150,15 @@ showSC sc | sc == typing_sc = "typing_sc"
           | sc == math_sc = "math_sc"
           | sc == script_sc = "script_sc"
           | sc == comment_sc = "comment_sc"
-          | sc == parenP_sc = "parenP_sc"
+          | sc == paren_sc = "paren_sc"
           | sc == paren_sc' = "paren_sc'"
           | sc == struct_sc = "struct_sc"
 showSC _ = ""
 
-data CompileMsg = CompileMsg { msgPosition :: SourcePosition, msgDescription :: BS.ByteString }
-    deriving Show
-emptyCompileMsg = CompileMsg { msgPosition = startPosition, msgDescription = "" }
-
-prettyCompileMsg :: CompileMsg -> String
-prettyCompileMsg msg = (show (lineNumber $ msgPosition msg)) ++ ":" ++ (show (lineNumber $ msgPosition msg)) ++ ": " ++ C8.unpack (msgDescription msg)
-
-data SourcePosition = SourcePosition { charOffset :: !Int64, lineNumber :: !Int64, columnNumber :: !Int64 }
-    deriving (Show, Eq)
-startPosition = SourcePosition 0 1 1
-
-data LexerState = LexerState
-  { lexerFeed :: LexerFeed
-  , lexerSC :: !SC
-  , lexerBreadcrumbs :: [SC]
-  }
-    deriving (Show, Eq)
-initLexerState = LexerState
-  { lexerFeed = emptyFeed
-  , lexerSC = 0
-  , lexerBreadcrumbs = []
-  }
-
-newtype Lexer a = Lexer { unLexer :: ExceptT CompileMsg (StateT LexerState IO) a }
-
-instance Functor Lexer where
-    fmap f (Lexer m) = Lexer (fmap f m)
-instance Applicative Lexer where
-    pure = Lexer . pure
-    (Lexer f) <*> (Lexer x) = Lexer (f <*> x)
-instance Monad Lexer where
-    return = Lexer . return
-    (Lexer m) >>= f = Lexer (m >>= unLexer . f)
-instance MonadState LexerState Lexer where
-    get = Lexer get
-    put = Lexer . put
-instance MonadError CompileMsg Lexer where
-    throwError = Lexer . throwError
-    catchError (Lexer m) f = Lexer (catchError m (unLexer . f))
-instance MonadIO Lexer where
-    liftIO = Lexer . liftIO
-
-runLexer :: Lexer a -> SC -> BS.ByteString -> IO (Either CompileMsg a)
-runLexer (Lexer e) sc inp = evalStateT (runExceptT e) (initLexerState { lexerFeed = emptyFeed { feedData = inp }, lexerSC = sc })
-
-lexerErr :: BS.ByteString -> Lexer a
-lexerErr d = do
-    p <- gets (feedPosition . lexerFeed)
-    throwError $ emptyCompileMsg { msgPosition = p, msgDescription = d }
-
-data LexerFeed = LexerFeed
-  { feedPosition :: !SourcePosition
-  , feedPrevChar :: !Char
-  , feedData :: BS.ByteString
-  }
-    deriving (Show, Eq)
-emptyFeed = LexerFeed
-  { feedPosition = startPosition
-  , feedPrevChar = '\n'
-  , feedData = ""
-  }
-
-data Positioned a = Pos SourcePosition a
-    deriving (Show, Eq)
-position :: Positioned a -> SourcePosition
-position (Pos p _) = p
-stripPosition :: Positioned a -> a
-stripPosition (Pos _ a) = a
-
-instance Functor Positioned where
-    fmap f (Pos p x) = Pos p (f x)
-
 data Token
   = TInteger Int
   | TFloat Double
+  | TBool Bool
   | TString BS.ByteString
   | TSpecial BS.ByteString
   | TNewLine
@@ -240,6 +174,7 @@ data Token
 unToken :: Token -> String
 unToken (TInteger i) = show i ++ " "
 unToken (TFloat f) = show f ++ " "
+unToken (TBool b) = if b then "true " else "false "
 unToken (TString s) = show s ++ " "
 unToken (TSpecial s) = C8.unpack s ++ " "
 unToken TNewLine = "\n"
@@ -251,21 +186,28 @@ unToken TSpace = " "
 unToken (TLetter c) = [c]
 unToken TEOF = ""
 
-type LexerAction = LexerFeed -> Int64 -> Lexer (Positioned Token)
+type LexerAction = SourceFeed -> Int64 -> LP (Positioned Token)
 
 mkTFloat :: LexerAction
 mkTFloat feed len = do
     let bs = C8.take len (feedData feed)
     case BSR.fractional bs of
-        Nothing -> lexerErr "error reading integer literal"
+        Nothing -> lpErr "error reading integer literal"
         Just (i,_) -> return $ Pos (feedPosition feed) (TFloat i)
 
 mkTInteger :: LexerAction
 mkTInteger feed len = do
     let bs = C8.take len (feedData feed)
     case BSR.integral bs of
-        Nothing -> lexerErr "error reading integer literal"
+        Nothing -> lpErr "error reading integer literal"
         Just (i,_) -> return $ Pos (feedPosition feed) (TInteger i)
+
+mkTBool :: LexerAction
+mkTBool feed len = do
+    let bs = C8.take len (feedData feed)
+    return . Pos (feedPosition feed) . TBool $ case bs of
+        "true" -> True
+        "false" -> False
 
 mkTBS :: (BS.ByteString -> Token) -> LexerAction
 mkTBS t feed len = return $ Pos (feedPosition feed) (t $ C8.take len (feedData feed))
@@ -276,75 +218,47 @@ mkT t feed _ = return $ Pos (feedPosition feed) t
 mkTLetter :: LexerAction
 mkTLetter feed len = return $ Pos (feedPosition feed) (TLetter $ C8.head (feedData feed))
 
-andBegin :: LexerAction -> SC -> LexerAction
-(act `andBegin` sc) input len = do 
-    modify' $ \st -> st { lexerSC = sc }
-    act input len
-
 descend :: SC -> LexerAction -> LexerAction
 descend sc con input len = do
-    sc' <- gets lexerSC
+    sc' <- gets currentSC
     modify' $ \st -> st 
-        { lexerBreadcrumbs = sc' : lexerBreadcrumbs st
-        , lexerSC = sc
+        { pathSC = sc' : pathSC st
+        , currentSC = sc
         }
     con input len
 
 ascend :: LexerAction -> LexerAction
 ascend con input len = do
-    bc <- gets lexerBreadcrumbs
+    bc <- gets pathSC
     case bc of
-        [] -> lexerErr "illegal end block character"
+        [] -> lpErr "illegal end block character"
         sc:scs -> do
             modify' $ \st -> st
-                { lexerBreadcrumbs = scs
-                , lexerSC = sc
+                { pathSC = scs
+                , currentSC = sc
                 }
             con input len
 
-type SC = Int
-
-scan :: Lexer (Positioned Token)
+scan :: LP (Positioned Token)
 scan = do
-    feed <- gets lexerFeed
-    sc <- gets lexerSC
+    feed <- gets sourceFeed
+    sc <- gets currentSC
     case alexScan feed sc of
         AlexEOF -> return $ Pos (feedPosition feed) TEOF
-        AlexError feed' -> lexerErr "lexical error"
+        AlexError feed' -> lpErr "lexical error"
         AlexSkip feed' len -> do
-            modify' $ \st -> st { lexerFeed = feed' }
+            modify' $ \st -> st { sourceFeed = feed' }
             scan
         AlexToken feed' len action -> do
-            modify' $ \st -> st { lexerFeed = feed' }
+            modify' $ \st -> st { sourceFeed = feed' }
             action feed (fromIntegral len)
-
-printAllLex :: Lexer ()
-printAllLex = do
-    l <- scan
-    case l of
-        Pos _ TEOF -> return ()
-        _ -> do
-            sc <- gets lexerSC
-            liftIO $ putStrLn (showSC sc ++ " | " ++ show (stripPosition l))
-            printAllLex
-
-printAllUnToken :: Lexer ()
-printAllUnToken = do
-    l <- scan
-    case l of
-        Pos _ TEOF -> return ()
-        _ -> do
-            sc <- gets lexerSC
-            liftIO $ putStr (unToken (stripPosition l))
-            printAllUnToken
-
 
 skip _ _ = scan
 
 -- Alex compatability
 
-type AlexInput = LexerFeed
-alexGetByte :: LexerFeed -> Maybe (Word8, LexerFeed)
+type AlexInput = SourceFeed
+alexGetByte :: SourceFeed -> Maybe (Word8, SourceFeed)
 alexGetByte feed 
     | BS.null (feedData feed) = Nothing
     | otherwise = let 
@@ -352,12 +266,12 @@ alexGetByte feed
             d = BS.tail (feedData feed)
             c = BS.w2c b
             p = alexMove (feedPosition feed) c
-        in p `seq` d `seq` Just (b, LexerFeed
+        in p `seq` d `seq` Just (b, SourceFeed
             { feedPosition = p
             , feedData = d
             , feedPrevChar = c
             })
-alexInputPrevChar :: LexerFeed -> Char
+alexInputPrevChar :: SourceFeed -> Char
 alexInputPrevChar = feedPrevChar
 
 alex_tab_size = 4
