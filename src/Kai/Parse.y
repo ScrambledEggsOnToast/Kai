@@ -1,17 +1,14 @@
 {
-{-# LANGUAGE OverloadedStrings, DeriveDataTypeable #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Kai.Parse where
 
 import Kai.LP
 import Kai.Lex
+import Kai.AST
 
-import Data.Typeable
-import Data.Data
-import Control.Lens.Plated
-
-import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
 import Data.Monoid ((<>))
+
 }
 
 %name parseLP Typing
@@ -48,7 +45,7 @@ import Data.Monoid ((<>))
     break       { TReservedId "break" }
     continue    { TReservedId "continue" }
     print       { TReservedId "print" }
-    ident       { TVarId $$ }
+    ident1      { TVarId $$ }
     '+'         { TReservedOp "+" }
     '-'         { TReservedOp "-" }
     '*'         { TReservedOp "*" }
@@ -81,8 +78,11 @@ import Data.Monoid ((<>))
 
 %%
 
-Typing              : Typing newpar Paragraph                       { $3 : $1 }
-                    | Typing newpar                                 { $1 }
+ident               : ident1                                        { Text $1 }
+
+Typing              : Typing1                                       { T $1 }
+Typing1             : Typing1 newpar Paragraph                      { $3 : $1 }
+                    | Typing1 newpar                                { $1 }
                     | Paragraph                                     { [$1] }
                     | {- empty -}                                   { [] }
 
@@ -123,7 +123,7 @@ ScriptLn            : Exp                                           { Exp $1 }
                     | ident '*=' Exp                                { MultAssign $1 $3 }
                     | ident '/=' Exp                                { DivAssign $1 $3 }
                     | FunDecTop '{' Script '}'                      { $1 $3 }
-                    | for ident in '(' Exp ')' '{' Script '}'       { ForIn $2 $5 $8 }
+                    | for ident in '(' Exp ')' '{' Script '}'       { forin $2 $5 $8 }
                     | If                                            { $1 }
                     | class '(' ident ')'                           { LoadClass $3 }
                     | import '(' ident ')'                          { ImportPackage $3 }
@@ -137,7 +137,7 @@ If                  : If1 else '{' Script '}'                       { $1 $4 }
 If1                 : if '(' Exp ')' '{' Script '}'                 { IfElse $3 $6 }
                     | If1 elseif '(' Exp ')' '{' Script '}'         { \s -> $1 [IfElse $4 $7 s] }
 
-FunDecTop           : function ident TopParams TopTypings           { FunDec $2 $3 $4 }
+FunDecTop           : function ident TopParams TopTypings           { fundec $2 $3 $4 }
 TopParams           : {- empty -}                                   { [] }
                     | '(' TopParams1 ')'                            { $2 }
                     | '(' ')'                                       { [] }
@@ -146,22 +146,24 @@ TopParams1          : ident                                         { [$1] }
 TopTypings          : {- empty -}                                   { [] }
                     | TopTypings '[' ident ']'                      { $3 : $1 }
 
-Exp                 : '(' Exp ')'                                   { $2 }
-                    | Exp '+' Exp                                   { Plus $1 $3 }
-                    | Exp '-' Exp                                   { Minus $1 $3 }
-                    | Exp '*' Exp                                   { Mult $1 $3 }
-                    | Exp '/' Exp                                   { Div $1 $3 }
-                    | Exp '==' Exp                                  { Eq $1 $3 }
-                    | Exp '<' Exp                                   { Less $1 $3 }
-                    | Exp '>' Exp                                   { More $1 $3 }
-                    | Exp '<=' Exp                                  { LessEq $1 $3 }
-                    | Exp '>=' Exp                                  { MoreEq $1 $3 }
-                    | Exp '^' Exp                                   { Pow $1 $3 }
-                    | Exp '..' Exp                                  { Range $1 $3 }
-                    | intLit                                        { Int $1 }
+Lit                 : intLit                                        { Int $1 }
                     | floatLit                                      { Float $1 }
                     | boolLit                                       { Bool $1 }
-                    | stringLit                                     { String $1 }
+                    | stringLit                                     { String (Text $1) }
+
+Exp                 : '(' Exp ')'                                   { $2 }
+                    | Exp '+' Exp                                   { Oper Plus $1 $3 }
+                    | Exp '-' Exp                                   { Oper Minus $1 $3 }
+                    | Exp '*' Exp                                   { Oper Mult $1 $3 }
+                    | Exp '/' Exp                                   { Oper Div $1 $3 }
+                    | Exp '==' Exp                                  { Oper Eq $1 $3 }
+                    | Exp '<' Exp                                   { Oper Less $1 $3 }
+                    | Exp '>' Exp                                   { Oper More $1 $3 }
+                    | Exp '<=' Exp                                  { Oper LessEq $1 $3 }
+                    | Exp '>=' Exp                                  { Oper MoreEq $1 $3 }
+                    | Exp '^' Exp                                   { Oper Pow $1 $3 }
+                    | Exp '..' Exp                                  { Oper Range $1 $3 }
+                    | Lit                                           { Lit $1 }
                     | '[' Typing ']'                                { Typing $2 }
                     | '{' '}'                                       { Empty }
                     | List                                          { List $1 }
@@ -170,7 +172,7 @@ Exp                 : '(' Exp ')'                                   { $2 }
                     | ident CallParams                              { Call $1 $2 [] }
                     | ident CallTypings                             { Call $1 [] $2 }
                     | '\\' ident                                    { Call $2 [] [] }
-                    | ident                                         { Var $1 }
+                    | ident                                         { var $1 }
 
 CallParams          : '(' CallParams1 ')'                           { $2 }
                     | '(' ')'                                       { [] }
@@ -193,76 +195,5 @@ StructEntry         : ident ':' Exp                                 { ($1,$3) }
 parse = runLP parseLP typing_sc
 
 parseError t = lpErr $ "parse error at " <> (C8.pack $ show t)
-
-type Ident = BS.ByteString
-
-data Exp
-    = Plus Exp Exp
-    | Minus Exp Exp 
-    | Mult Exp Exp
-    | Div Exp Exp
-    | Ass Exp Exp
-    | Eq Exp Exp
-    | Less Exp Exp
-    | More Exp Exp
-    | LessEq Exp Exp
-    | MoreEq Exp Exp
-    | Pow Exp Exp
-    | Range Exp Exp
-    | Neg Exp
-    | Int Int
-    | Float Double
-    | Bool Bool
-    | String BS.ByteString
-    | Typing Typing
-    | List [Exp]
-    | Empty
-    | Struct [(Ident, Exp)]
-    | Var Ident
-    | Call Ident [Exp] [Typing]
-    deriving (Show, Eq, Data, Typeable)
-
-instance Plated Exp
-
-type Script = [ScriptLn]
-
-data ScriptLn
-    = Exp Exp
-    | Assign Ident Exp 
-    | PlusAssign Ident Exp 
-    | MinusAssign Ident Exp 
-    | MultAssign Ident Exp 
-    | DivAssign Ident Exp 
-    | FunDec Ident [Ident] [Ident] Script
-    | ForIn Ident Exp Script
-    | IfElse Exp Script Script
-    | LoadClass Ident
-    | ImportPackage Ident
-    | Print Exp
-    | Return Exp
-    | Break
-    | Continue
-    deriving (Show, Eq, Data, Typeable)
-
-type Typing = [Paragraph]
-
-type Paragraph = [Character]
-
-data Character
-    = Script Script
-    | Math Math
-    | Letter Char
-    | Space
-    | TypingCall Ident [Exp] [Typing]
-    deriving (Show, Eq, Data, Typeable)
-
-type Math = [MathExp]
-
-data MathExp
-    = Symbol Char
-    | Sub Math Math
-    | Super Math Math
-    | MathCall Ident [Exp] [Typing]
-    deriving (Show, Eq, Data, Typeable)
 
 }

@@ -291,10 +291,10 @@ alexGetByte feed
 alexInputPrevChar :: SourceFeed -> Char
 alexInputPrevChar = feedPrevChar
 
-alex_tab_size = 4
+tab_size = 4
 
 alexMove :: SourcePosition -> Char -> SourcePosition
-alexMove (SourcePosition a l c) '\t' = SourcePosition (a+1)  l     (((c+alex_tab_size-1) `div` alex_tab_size)*alex_tab_size+1)
+alexMove (SourcePosition a l c) '\t' = SourcePosition (a+1)  l     (((c+tab_size-1) `div` tab_size)*tab_size+1)
 alexMove (SourcePosition a l c) '\n' = SourcePosition (a+1) (l+1)   1
 alexMove (SourcePosition a l c) _    = SourcePosition (a+1)  l     (c+1)
 
