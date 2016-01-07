@@ -20,7 +20,7 @@ import Data.Int (Int64)
 }
 
 $whitechar = [ \t\n\r\f\v]
-$special   = [\,\:]
+$special   = [\,\:\\]
 
 $scriptblock = [\{\}]
 $functionargs = [\(\)]
@@ -44,13 +44,16 @@ $horizontalwhite = $white # $nl
 @newpar = ($horizontalwhite* $nl){2} $horizontalwhite*
 
 @reservedid =
-    class|import|function|return|for|in|if|then|else|break|continue|print
+    class|import|return|for|break|continue|print
+
+@reservedidblock =
+    in | if | else | elseif
 
 @scriptop =
-    "+"|"-"|"*"|"/"|"="|"+="|"-="|"*="|"/="|"=="|"^"|".."
+    "+"|"-"|"*"|"/"|"="|"+="|"-="|"*="|"/="|"=="|"<"|">"|"<="|">="|"^"|".."
 
 @mathop = 
-    "^"|"_"|"..."
+    "^"|"_"
 
 @varid     = $alpha $idchar*
 
@@ -81,10 +84,14 @@ kai :-
 <comment_sc>                [^\}] | \}[^\%]                 { skip }
 <comment_sc>                $nl                             { skip }
 
-<typing_sc, script_sc>      \{                              { descend script_sc (mkTBS TSpecial) }
+<typing_sc>                 \{                              { descend script_sc (mkTBS TSpecial) }
+<script_sc>                 \{                              { descend struct_sc (mkTBS TSpecial) }
 <typing_sc, script_sc>      \}                              { ascend (mkTBS TSpecial) }
 
 <script_sc>                 @reservedid                     { mkTBS TReservedId }
+<script_sc>                 @reservedidblock                { descend scripttop_sc (mkTBS TReservedId) }
+<script_sc>                 function                        { descend functop_sc (mkTBS TReservedId) }
+
 <script_sc>                 ($horizontalwhite* $nl)+ 
                                 $horizontalwhite*           { mkT TNewLine }
 <script_sc, struct_sc,
@@ -94,7 +101,7 @@ kai :-
 <script_sc, struct_sc,
     paren_sc>               @scriptop                       { mkTBS TReservedOp }
 <script_sc, struct_sc, 
-    paren_sc>               @decimal                        { mkTInteger }
+    paren_sc>               "-"?@decimal                    { mkTInteger }
 <script_sc, struct_sc, 
     paren_sc>               @decimal \. @decimal @exponent? 
                                 | @decimal @exponent        { mkTFloat }
@@ -113,10 +120,11 @@ kai :-
                                 | $horizontalwhite* $nl 
                                 $horizontalwhite*           { mkT TSpace }
 <typing_sc>                 @newpar                         { mkT TNewPar }
-<typing_sc>                 $typing / [[^\(\[] $nl]         { mkTLetter }
+<typing_sc>                 $typing / [[^\[\(] $nl]         { mkTLetter }
 <typing_sc>                 \[                              { descend math_sc (mkTBS TSpecial) }
 
-<typing_sc, math_sc>        \\ @varid                       { mkTBS (TVarId . C8.tail) }
+<typing_sc, math_sc>        \\ / $alpha                     { mkTBS TSpecial }
+<typing_sc, math_sc>        \\^@varid                       { mkTBS TVarId }
 <typing_sc, math_sc>        @varid / \(                     { descend paren_sc' (mkTBS TVarId) }
 <typing_sc, math_sc>        @varid / \[                     { descend paren_sc' (mkTBS TVarId) }
 
@@ -124,7 +132,7 @@ kai :-
 <paren_sc'>                 \[                              { descend typing_sc (mkTBS TSpecial) }
 <paren_sc'>                 $horizontalwhite+  | $nl        { ascend $ mkT TSpace }
 <paren_sc'>                 @newpar                         { ascend $ mkT TNewPar }
-<paren_sc'>                 $typing / [[^\(\[] $nl]         { ascend $ mkTLetter }
+<paren_sc'>                 $typing / [[^\[\(] $nl]         { ascend $ mkTLetter }
 <paren_sc'>                 \\ @varid                       { ascend $ mkTBS (TVarId . C8.tail) }
 <paren_sc'>                 @varid / \(                     { mkTBS TVarId }
 <paren_sc'>                 @varid / \[                     { mkTBS TVarId }
@@ -137,11 +145,19 @@ kai :-
 <struct_sc>                 \}                              { ascend (mkTBS TSpecial) }
 <paren_sc, struct_sc>       $nl                             { skip }
 
-<math_sc>                   $nl                             { mkT TNewLine }
+<math_sc>                   $nl                             { skip }
 <math_sc>                   @mathop                         { mkTBS TReservedOp }
 <math_sc>                   $horizontalwhite+               { skip }
-<math_sc>                   $math / [^\(\[]                 { mkTLetter }
+<math_sc>                   $math / [[^\[\(] $nl]           { mkTLetter }
 <math_sc>                   \]                              { ascend (mkTBS TSpecial) }
+<math_sc>                   [\{\}]                          { mkTBS TSpecial }
+
+<functop_sc>                @varid                          { mkTBS TVarId }
+<functop_sc>                [\(\[\)\]\,]                    { mkTBS TSpecial }
+<functop_sc>                \{                              { ascend (descend script_sc (mkTBS TSpecial)) }
+<scripttop_sc>              \(                              { descend paren_sc (mkTBS TSpecial) }
+<scripttop_sc>              \{                              { ascend (descend script_sc (mkTBS TSpecial)) }
+<functop_sc, scripttop_sc>  [$horizontalwhite $nl]+         { skip }
 
 {
 
@@ -153,12 +169,13 @@ showSC sc | sc == typing_sc = "typing_sc"
           | sc == paren_sc = "paren_sc"
           | sc == paren_sc' = "paren_sc'"
           | sc == struct_sc = "struct_sc"
+          | sc == functop_sc = "functop_sc"
 showSC _ = ""
 
 data Token
-  = TInteger Int
-  | TFloat Double
-  | TBool Bool
+  = TInteger !Int
+  | TFloat !Double
+  | TBool !Bool
   | TString BS.ByteString
   | TSpecial BS.ByteString
   | TNewLine
@@ -167,20 +184,20 @@ data Token
   | TReservedOp BS.ByteString
   | TNewPar
   | TSpace
-  | TLetter Char
+  | TLetter !Char
   | TEOF
     deriving (Show, Eq)
 
 unToken :: Token -> String
-unToken (TInteger i) = show i ++ " "
-unToken (TFloat f) = show f ++ " "
-unToken (TBool b) = if b then "true " else "false "
-unToken (TString s) = show s ++ " "
-unToken (TSpecial s) = C8.unpack s ++ " "
+unToken (TInteger i) = show i
+unToken (TFloat f) = show f
+unToken (TBool b) = if b then "true" else "false"
+unToken (TString s) = show s
+unToken (TSpecial s) = C8.unpack s
 unToken TNewLine = "\n"
-unToken (TReservedId s) = C8.unpack s ++ " "
-unToken (TVarId s) = C8.unpack s ++ " "
-unToken (TReservedOp o) = C8.unpack o ++ " "
+unToken (TReservedId s) = C8.unpack s
+unToken (TVarId s) = C8.unpack s
+unToken (TReservedOp o) = C8.unpack o
 unToken TNewPar = "\n\n"
 unToken TSpace = " "
 unToken (TLetter c) = [c]

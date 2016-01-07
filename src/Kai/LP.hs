@@ -14,7 +14,7 @@ import Data.Int (Int64)
 type SC = Int
 
 data CompileMsg = CompileMsg { msgPosition :: SourcePosition, msgDescription :: BS.ByteString }
-    deriving Show
+    deriving (Show, Eq)
 emptyCompileMsg = CompileMsg { msgPosition = startPosition, msgDescription = "" }
 
 prettyCompileMsg :: CompileMsg -> String
