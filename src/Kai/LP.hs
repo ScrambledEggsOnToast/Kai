@@ -5,30 +5,59 @@ module Kai.LP where
 import Control.Monad.State
 import Control.Monad.Except
 
+import qualified Language.Lua.Token as Lua
+import qualified Language.Lua.Syntax as Lua
+import qualified Language.Lua.Parser as Lua
+
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
 import Data.Word (Word8)
 
 import Data.Int (Int64)
 
+import qualified Data.Sequence as S
+
+import Data.Loc
+
+import Text.PrettyPrint
+
 type SC = Int
 
-data CompileMsg = CompileMsg { msgPosition :: SourcePosition, msgDescription :: BS.ByteString }
+data CompileMsg = CompileMsg { msgLocation :: Loc, msgDescription :: BS.ByteString }
     deriving (Show, Eq)
-emptyCompileMsg = CompileMsg { msgPosition = startPosition, msgDescription = "" }
+emptyCompileMsg = CompileMsg { msgLocation = NoLoc, msgDescription = "" }
 
-prettyCompileMsg :: CompileMsg -> String
-prettyCompileMsg msg = (show (lineNumber $ msgPosition msg)) ++ ":" ++ (show (lineNumber $ msgPosition msg)) ++ ": " ++ C8.unpack (msgDescription msg)
+prettyCompileMsg :: CompileMsg -> BS.ByteString -> Doc
+prettyCompileMsg m src = case msgLocation m of 
+    NoLoc -> text (C8.unpack (msgDescription m))
+    l@(Loc (Pos f l1 c1 o1) (Pos _ _ c2 o2)) -> 
+        let padding = 5
+            paddingStart = min c1 padding
+        in hcat
+            [ text $ displayLoc l, text ": "
+            , text $ C8.unpack (msgDescription m), text ": "
+            , nest 3 . vcat $
+                [ text $ C8.unpack . C8.takeWhile (/='\n') . C8.take (fromIntegral $ o2 - o1 + 1 + padding + paddingStart) . C8.drop (fromIntegral $ o1 - padding) $ src
+                , nest paddingStart . text $ replicate (o2-o1+1) '~'
+                ]
+            ]
 
-data SourcePosition = SourcePosition { charOffset :: !Int64, lineNumber :: !Int64, columnNumber :: !Int64 }
+data Token 
+  = TkLua Lua.Token
+  | TkChar BS.ByteString
+  | TkInline (Lua.FunctionCall ())
+  | TkNewPar
+  | TkSpace
+  | TkSymbol BS.ByteString
+  | TkUnderscore
+  | TkEOF
     deriving (Show, Eq)
-
-startPosition = SourcePosition 0 1 1
 
 data LPState = LPState
   { sourceFeed :: SourceFeed
   , currentSC :: !SC
   , pathSC :: [SC]
+  , accumTokens :: S.Seq (L Token)
   }
     deriving (Show, Eq)
 
@@ -36,6 +65,7 @@ initialLPState = LPState
   { sourceFeed = emptyFeed
   , currentSC = 0
   , pathSC = []
+  , accumTokens = S.empty
   }
 
 newtype LP a = LP { unLP :: ExceptT CompileMsg (State LPState) a }
@@ -58,29 +88,22 @@ instance MonadError CompileMsg LP where
 runLP :: LP a -> SC -> BS.ByteString -> Either CompileMsg a
 runLP (LP e) sc inp = evalState (runExceptT e) (initialLPState { sourceFeed = emptyFeed { feedData = inp }, currentSC = sc })
 
+runLPList :: LP a -> SC -> [L Token] -> Either CompileMsg a
+runLPList (LP e) sc ts = evalState (runExceptT e) (initialLPState { accumTokens = S.fromList ts })
+
 lpErr :: BS.ByteString -> LP a
 lpErr d = do
     p <- gets (feedPosition . sourceFeed)
-    throwError $ emptyCompileMsg { msgPosition = p, msgDescription = d }
+    throwError $ emptyCompileMsg { msgLocation = fromPos p, msgDescription = d }
 
 data SourceFeed = SourceFeed
-  { feedPosition :: !SourcePosition
+  { feedPosition :: !Pos
   , feedPrevChar :: !Char
   , feedData :: BS.ByteString
   }
     deriving (Show, Eq)
 emptyFeed = SourceFeed
-  { feedPosition = startPosition
+  { feedPosition = startPos ""
   , feedPrevChar = '\n'
   , feedData = ""
   }
-
-data Positioned a = Pos SourcePosition a
-    deriving (Show, Eq)
-position :: Positioned a -> SourcePosition
-position (Pos p _) = p
-stripPosition :: Positioned a -> a
-stripPosition (Pos _ a) = a
-
-instance Functor Positioned where
-    fmap f (Pos p x) = Pos p (f x)
