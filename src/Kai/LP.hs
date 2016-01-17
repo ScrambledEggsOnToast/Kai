@@ -2,6 +2,8 @@
 
 module Kai.LP where
 
+import Kai.Syntax
+
 import Control.Monad.State
 import Control.Monad.Except
 
@@ -58,6 +60,7 @@ data LPState = LPState
   , currentSC :: !SC
   , pathSC :: [SC]
   , accumTokens :: S.Seq (L Token)
+  , subtypings :: S.Seq (Typing ())
   }
     deriving (Show, Eq)
 
@@ -66,6 +69,7 @@ initialLPState = LPState
   , currentSC = 0
   , pathSC = []
   , accumTokens = S.empty
+  , subtypings = S.empty
   }
 
 newtype LP a = LP { unLP :: ExceptT CompileMsg (State LPState) a }
@@ -85,8 +89,11 @@ instance MonadError CompileMsg LP where
     throwError = LP . throwError
     catchError (LP m) f = LP (catchError m (unLP . f))
 
-runLP :: LP a -> SC -> BS.ByteString -> Either CompileMsg a
-runLP (LP e) sc inp = evalState (runExceptT e) (initialLPState { sourceFeed = emptyFeed { feedData = inp }, currentSC = sc })
+runLP :: LP a -> SC -> BS.ByteString -> Either CompileMsg (a, S.Seq (Typing ()))
+runLP (LP e) sc inp = do
+    x <- a
+    return (x, subtypings s)
+  where (a,s) = runState (runExceptT e) (initialLPState { sourceFeed = emptyFeed { feedData = inp }, currentSC = sc })
 
 runLPList :: LP a -> SC -> [L Token] -> Either CompileMsg a
 runLPList (LP e) sc ts = evalState (runExceptT e) (initialLPState { accumTokens = S.fromList ts })

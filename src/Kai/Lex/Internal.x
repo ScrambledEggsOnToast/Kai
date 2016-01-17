@@ -23,7 +23,7 @@ import Data.Sequence ((|>),(<|), ViewL(..), ViewR(..))
 import qualified Data.Sequence as S
 
 import Kai.LP
-import Kai.Parse
+import {-# SOURCE #-} Kai.Parse ( parseCall )
 
 }
 
@@ -63,7 +63,7 @@ kai :-
 <typing>                                \{                      { descend lua (mkT $ TkLua Lua.TkLBrace) }
 <lua>                                   \}                      { ascend (mkT $ TkLua Lua.TkRBrace) }
 
-<typing, typingshort>                   \<                      { descend typing (mkT $ TkLua Lua.TkLt) }
+<typing, typingshort>                   \<                      { descend typing (mkT $ TkLua Lua.TkGt) }
 <typing, typingshort>                   \>                      { ascend (mkT $ TkLua Lua.TkGt) }
 
 <typing, typingshort>                   \[                      { descend math (mkT $ TkLua Lua.TkLBracket) }
@@ -123,8 +123,8 @@ kai :-
 <lua, paren, brace, bracket>            "~="                    { mkT $ TkLua Lua.TkNeq }
 <lua, paren, brace, bracket>            "<="                    { mkT $ TkLua Lua.TkLeq }
 <lua, paren, brace, bracket>            ">="                    { mkT $ TkLua Lua.TkGeq }
-<lua, paren, brace, bracket>            "<" / $nl               { descend typing (mkT $ TkLua Lua.TkLt) }
-<lua, paren, brace, bracket>            "<"                     { handleLAngle }
+<lua, paren, brace, bracket, func>      "<" / $nl               { descend typing (mkT $ TkLua Lua.TkLt) }
+<lua, paren, brace, bracket, func>      "<"                     { handleLAngle }
 <lua, paren, brace, bracket>            ">"                     { mkT $ TkLua Lua.TkGt }
 <lua, paren, brace, bracket>            "="                     { mkT $ TkLua Lua.TkAssign }
 <lua, paren, brace, bracket, func>      "("                     { descend paren (mkT $ TkLua Lua.TkLParen) }
@@ -201,44 +201,32 @@ handleLAngle :: LexerAction
 handleLAngle feed len = do
     st <- get
     put $ st { pathSC = [currentSC st], currentSC = typingshort }
-    ts <- getTs S.empty
-    case ts of
-        Nothing -> put st
-        Just ts' -> modify' $ \st' -> st' { pathSC = pathSC st, currentSC = currentSC st, accumTokens = ts' }
+    (do
+        ts <- getTs S.empty
+        modify' $ \st' -> st' { pathSC = pathSC st, currentSC = currentSC st, accumTokens = ts }
+        ) `catchError` const (put st)
     (mkT $ TkLua Lua.TkLt) feed len
   where
     getTs ts = do
-        feed <- gets sourceFeed
-        sc <- gets currentSC
-        case alexScan feed sc of
-            AlexSkip feed' len -> do
-                modify' $ \st -> st { sourceFeed = feed' }
-                getTs ts
-            AlexToken feed' len action -> do
-                modify' $ \st -> st { sourceFeed = feed' }
-                t <- action feed (fromIntegral len)
-                p <- gets pathSC
-                case p of
-                    [] -> return (Just (ts |> t))
-                    _ -> getTs (ts |> t)
-            _ -> return Nothing
-        
+        t <- scan
+        p <- gets pathSC
+        case p of
+            [] -> return (t <| ts)
+            _ -> case t of
+                L _ TkEOF -> lpErr "Couldn't close angle bracket"
+                _ -> getTs (t <| ts)
 
 scan :: LP (L Token)
 scan = do
     ts <- gets accumTokens
-    case S.viewl ts of
-        t:<ts' -> do
+    case S.viewr ts of
+        ts':>t -> do
             modify' $ \st -> st { accumTokens = ts' }
             return t
-        EmptyL -> do
+        EmptyR -> do
             ip <- inlinePossible
             case ip of
-                True -> do
-                    mi <- scanInline
-                    case mi of
-                        Nothing -> scanNormal
-                        Just i -> return i
+                True -> scanInline `catchError` const scanNormal
                 False -> scanNormal
   where
     inlinePossible = do
@@ -261,45 +249,52 @@ scanNormal = do
             action feed (fromIntegral len)
 
 -- finds the largest valid inline function call (if there is one)
-scanInline :: LP (Maybe (L Token))
+scanInline :: LP (L Token)
 scanInline = do
     feed <- gets sourceFeed
-    let (LP lp) = getTs []
-        r = evalState (runExceptT lp) (initialLPState { sourceFeed = feed, currentSC = func })
-    case r of
-        Left e -> return Nothing
-        Right tfs -> case valid tfs of
-            Nothing -> return Nothing
-            Just (t,f) -> do
-                modify' $ \st -> st { sourceFeed = f }
-                return $ Just t
-  where
-    valid [] = Nothing
-    valid ((t, Nothing):tfs) = valid tfs
-    valid tfs@((t, Just f):tfs') = 
-        case runLPList parseCall lua (reverse $ map fst tfs) of
-            Right x ->
-                let l = foldl1' (<-->) . map (\(L l _, _) -> l) $ tfs in 
-                    Just (L l (TkInline x), f)
-            _ -> valid tfs'
+    st <- get
+    put $ st { currentSC = func, pathSC = [] }
+    tfs <- getTs []
+    (do
+        (t,st') <- valid st tfs
+        put $ st' { currentSC = currentSC st, pathSC = pathSC st }
+        return t) `catchError` (\e -> put st >> throwError e)
+
+valid s [] = lpErr "no valid inline calls"
+valid s ((t, Nothing):tfs) = valid s tfs
+valid s tfs@((t, Just st):tfs') = (do
+    put $ s { sourceFeed = emptyFeed, accumTokens = (S.fromList $ map fst tfs) }
+    x <- parseCall
+    typings <- gets subtypings
+    return $ 
+        let l = foldl1' (<-->) . map (\(L l _, _) -> l) $ tfs 
+            st' = st { subtypings = typings }
+        in (L l (TkInline x), st')
+    ) `catchError` const (valid s tfs')
         
-    getTs tfs = do
-        feed <- gets sourceFeed
-        sc <- gets currentSC
-        case alexScan feed sc of
-            AlexSkip feed' len -> do
-                modify' $ \st -> st { sourceFeed = feed' }
-                getTs tfs
-            AlexToken feed' len action -> do
-                modify' $ \st -> st { sourceFeed = feed' }
-                t <- action feed (fromIntegral len)
-                p <- gets pathSC
-                case t of
-                    L _ (TkLua _) -> case p of
-                        [] -> getTs ((t, Just feed'):tfs)
-                        _ -> getTs ((t, Nothing):tfs)
+getTs tfs = (do
+    accumLength <- gets (S.length . accumTokens)
+    if accumLength == 1 then do
+            t :< _ <- gets (S.viewl . accumTokens)
+            modify' $ \st -> st { accumTokens = S.empty }
+            mst <- gets Just 
+            getTs ((t,mst):tfs)
+        else if accumLength > 1 then do
+            t <- scan
+            getTs ((t,Nothing):tfs)
+        else do
+            t <- scan
+            p <- gets pathSC
+            case p of
+                [] -> case t of
+                    L _ (TkLua _) -> do
+                        st <- get
+                        getTs ((t, Just st):tfs)
                     _ -> return tfs
-            _ -> return tfs
+                _ -> case t of
+                    L _ TkEOF -> return tfs
+                    _ -> getTs ((t, Nothing):tfs)
+    ) `catchError` const (return tfs)
 
 skip _ _ = scan
 
