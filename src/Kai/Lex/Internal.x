@@ -23,7 +23,9 @@ import Data.Sequence ((|>),(<|), ViewL(..), ViewR(..))
 import qualified Data.Sequence as S
 
 import Kai.LP
-import {-# SOURCE #-} Kai.Parse ( parseCall )
+import {-# SOURCE #-} Kai.Parse ( parseCall, parseTyping )
+
+import Debug.Trace
 
 }
 
@@ -33,7 +35,8 @@ $large      = [A-Z \xc0-\xd6 \xd8-\xde]
 $small      = [a-z \xdf-\xf6 \xf8-\xff \_]
 $alpha      = [$small $large]
 
-@luaname    = [$alpha \_] [$alpha $digit \_]*
+@luaname    = [$alpha \_] [$alpha $digit \_]+
+@inlinename = [$alpha] [$alpha $digit]+
 
 @exponent   = [Ee] ("+" | "-")? $digit+
 @hexponent  = [Pp] ("+" | "-")? $hex+
@@ -60,7 +63,7 @@ kai :-
 
                                         "--".*                  { skip }
 
-<typing>                                \{                      { descend lua (mkT $ TkLua Lua.TkLBrace) }
+<typing, typingshort>                   \{                      { descend lua (mkT $ TkLua Lua.TkLBrace) }
 <lua>                                   \}                      { ascend (mkT $ TkLua Lua.TkRBrace) }
 
 <typing, typingshort>                   \<                      { descend typing (mkT $ TkLua Lua.TkGt) }
@@ -142,7 +145,8 @@ kai :-
 <lua, paren, brace, bracket>            "..."                   { mkT $ TkLua Lua.TkVararg }
 <lua, paren, brace, bracket, func>      "'"                     { descend string1 (mkT $ TkLua Lua.TkQuote) }
 <lua, paren, brace, bracket, func>      \"                      { descend string2 (mkT $ TkLua Lua.TkDoubleQuote) }
-<lua, paren, brace, bracket, func>      @luaname                { mkTBS $ \s -> TkLua (Lua.TkIdent $ C8.unpack s) }
+<lua, paren, brace, bracket>            @luaname                { mkTBS $ \s -> TkLua (Lua.TkIdent $ C8.unpack s) }
+<func>                                  @inlinename             { mkTBS $ \s -> TkLua (Lua.TkIdent $ C8.unpack s) }
 
 <string1>                               @luachar1*              { mkTBS $ \s -> TkLua (Lua.TkStringLit $ C8.unpack s) }
 <string1>                               \'                      { ascend (mkT $ TkLua Lua.TkQuote) }
@@ -203,18 +207,24 @@ handleLAngle feed len = do
     put $ st { pathSC = [currentSC st], currentSC = typingshort }
     (do
         ts <- getTs S.empty
-        modify' $ \st' -> st' { pathSC = pathSC st, currentSC = currentSC st, accumTokens = ts }
-        ) `catchError` const (put st)
-    (mkT $ TkLua Lua.TkLt) feed len
-  where
-    getTs ts = do
-        t <- scan
-        p <- gets pathSC
-        case p of
-            [] -> return (t <| ts)
-            _ -> case t of
-                L _ TkEOF -> lpErr "Couldn't close angle bracket"
-                _ -> getTs (t <| ts)
+        st' <- get
+        put $ st' { accumTokens = ts, sourceFeed = emptyFeed }
+        t <- parseTyping
+        modify' $ \s -> s { pathSC = pathSC st, currentSC = currentSC st, sourceFeed = sourceFeed st',
+            accumTokens = S.fromList $ map (L NoLoc) [TkLua Lua.TkGt, TkTyping t, TkLua Lua.TkLt]}
+        scan
+        ) `catchError` const (do
+            put st
+            (mkT $ TkLua Lua.TkLt) feed len
+            )
+getTs ts = do
+    t <- scan
+    p <- gets pathSC
+    case p of
+        [] -> return ts
+        _ -> case t of
+            L _ TkEOF -> lpErr "Couldn't close angle bracket"
+            _ -> getTs (t <| ts)
 
 scan :: LP (L Token)
 scan = do
@@ -255,46 +265,43 @@ scanInline = do
     st <- get
     put $ st { currentSC = func, pathSC = [] }
     tfs <- getTs []
-    (do
-        (t,st') <- valid st tfs
-        put $ st' { currentSC = currentSC st, pathSC = pathSC st }
-        return t) `catchError` (\e -> put st >> throwError e)
-
-valid s [] = lpErr "no valid inline calls"
-valid s ((t, Nothing):tfs) = valid s tfs
-valid s tfs@((t, Just st):tfs') = (do
-    put $ s { sourceFeed = emptyFeed, accumTokens = (S.fromList $ map fst tfs) }
-    x <- parseCall
-    typings <- gets subtypings
-    return $ 
-        let l = foldl1' (<-->) . map (\(L l _, _) -> l) $ tfs 
-            st' = st { subtypings = typings }
-        in (L l (TkInline x), st')
-    ) `catchError` const (valid s tfs')
-        
-getTs tfs = (do
-    accumLength <- gets (S.length . accumTokens)
-    if accumLength == 1 then do
-            t :< _ <- gets (S.viewl . accumTokens)
-            modify' $ \st -> st { accumTokens = S.empty }
-            mst <- gets Just 
-            getTs ((t,mst):tfs)
-        else if accumLength > 1 then do
-            t <- scan
-            getTs ((t,Nothing):tfs)
-        else do
-            t <- scan
-            p <- gets pathSC
-            case p of
-                [] -> case t of
-                    L _ (TkLua _) -> do
-                        st <- get
-                        getTs ((t, Just st):tfs)
-                    _ -> return tfs
-                _ -> case t of
-                    L _ TkEOF -> return tfs
-                    _ -> getTs ((t, Nothing):tfs)
-    ) `catchError` const (return tfs)
+    (t,st') <- valid st tfs
+    put $ st' { currentSC = currentSC st, pathSC = pathSC st }
+    return t
+  where 
+    valid s [] = lpErr "no valid inline calls"
+    valid s ((t, Nothing):tfs) = valid s tfs
+    valid s tfs@((t, Just st):tfs') = (do
+        put $ s { sourceFeed = emptyFeed, accumTokens = (S.fromList $ map fst tfs) }
+        x <- parseCall
+        return $ 
+            let l = foldl1' (<-->) . map (\(L l _, _) -> l) $ tfs 
+            in (L l (TkInline x), st)
+        ) `catchError` const (valid s tfs')
+            
+    getTs tfs = (do
+        accumLength <- gets (S.length . accumTokens)
+        if accumLength == 1 then do
+                t :< _ <- gets (S.viewl . accumTokens)
+                modify' $ \st -> st { accumTokens = S.empty }
+                mst <- gets Just 
+                getTs ((t,mst):tfs)
+            else if accumLength > 1 then do
+                t <- scan
+                getTs ((t,Nothing):tfs)
+            else do
+                t <- scan
+                p <- gets pathSC
+                case p of
+                    [] -> case t of
+                        L _ (TkLua _) -> do
+                            st <- get
+                            getTs ((t, Just st):tfs)
+                        _ -> return tfs
+                    _ -> case t of
+                        L _ TkEOF -> return tfs
+                        _ -> getTs ((t, Nothing):tfs)
+        ) `catchError` const (return tfs)
 
 skip _ _ = scan
 

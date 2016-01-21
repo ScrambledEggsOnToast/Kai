@@ -27,6 +27,10 @@ import GHC.Exts (toList)
 
 import Control.Monad.State
 
+import Debug.Trace
+
+import qualified Text.PrettyPrint.Leijen as PP
+
 }
 
 %name parseTyping Typing
@@ -102,6 +106,7 @@ import Control.Monad.State
     int         { TkLua (Lua.TkIntLit $$) }
     float       { TkLua (Lua.TkFloatLit $$) }
 
+    typing      { TkTyping $$ }
     inline      { TkInline $$ }
     newpar      { TkNewPar }
     space       { TkSpace }
@@ -122,25 +127,24 @@ import Control.Monad.State
 
 -- Kai
 
-Typing          : Typing1                                           {% typingify $1 }
+Typing          : Typing1                                           {% makeCall $1 }
 
-Typing1         : {- empty -}                                       { (S.empty, S.empty) }
-                | Typingbit Typing1                                 { $2 `addBit` $1 }
-                | Kailua Typing1                                    { $2 `addLua` $1 }
-                | '[' Math ']' Typing1                              { $4 `addMath` $2 }
+Typing1         : {- empty -}                                       { Typing () S.empty }
+                | Typing1 Typingbit                                 { $1 `addBit` $2 }
+                | Typing1 Kailua                                    {% $1 `addLua` $2 }
+                | Typing1 '[' Math ']'                              { $1 `addBit` (TypingMath () $3) }
 
 Typingbit       : newpar                                            { TypingNewPar () }
                 | space                                             { TypingSpace () }
                 | symbol                                            { TypingSymbol () $1 }
 
-Math            : {- empty -}                                       { const (S.empty, S.empty) }
-                | Mathbit Math                                      { $2 `addMathBit` $1 }
-                | Kailua Math                                       { $2 `addMathLua` $1 }
+Math            : {- empty -}                                       { Math () S.empty }
+                | Math Mathbit                                      { $1 `addMathBit` $2 }
+                | Math Kailua                                       {% $1 `addMathLua` $2 }
 
--- Mathbit :: Int -> (MathBit (), S.Seq (KaiLua ()))
-Mathbit         : symbol                                            { const (MathSymbol () $1, S.empty) }
-                | '{' Math '}'                                      { \l -> let (mbs,ls) = $2 l in (SubMath () (Math () mbs), ls) }
-                | Mathbit Mathbinop Mathbit                         { \l -> let (m1, l1) = $1 l; (m2, l2) = $3 (l + S.length l1) in (MathOp () $2 m1 m2, l1 S.>< l2) }
+Mathbit         : symbol                                            { MathSymbol () $1 }
+                | '{' Math '}'                                      { SubMath () $2 }
+                | Mathbit Mathbinop Mathbit                         { MathOp () $2 $1 $3 }
 
 Mathbinop       : '^'                                               { MathSup }
                 | '_'                                               { MathSub }
@@ -221,7 +225,7 @@ Exp             : nil                                               { Nil () }
                 | function Funcbody                                 { FunDef () $2 }
                 | Prefixexp                                         { PrefixExp () $1 }
                 | Tableconstructor                                  { TableCtor () $1 }
-                | '<' Typing '>'                                    { PrefixExp () (PrefixFunCall () $2) }
+                | '<' typing '>'                                    { PrefixExp () (PrefixFunCall () $2) }
                 | Exp Binop Exp                                     { Binop () $2 $1 $3 }
                 | Unop Exp                                          { Unop () $1 $2 }
 
@@ -241,7 +245,7 @@ Args            : '(' Explist ')'                                   { Args () $2
 TypingArgs      : TypingArgs1                                       { $1 }
                 | {- empty -}                                       { [] }
 
-TypingArgs1     : '<' Typing '>' TypingArgs                         { $2:$4 }
+TypingArgs1     : '<' typing '>' TypingArgs                         { $2:$4 }
 
 Funcbody        : '(' ')' Block end                                 { FunctionBody () (IdentList () []) False $3 }
                 | '(' '...' ')' Block end                           { FunctionBody () (IdentList () []) True $4 }
@@ -293,48 +297,26 @@ String          : '\'' string '\''                                  { $2 }
 
 {
 
+addBit :: Typing () -> TypingBit () -> Typing ()
+addBit (Typing () tbs) tb = Typing () (tbs S.|> tb)
+
+addLua :: Typing () -> KaiLua () -> LP (Typing ())
+addLua t l = do
+    r <- newLua l
+    return $ addBit t (TypingLua () r)
+
+addMathBit :: Math () -> MathBit () -> Math ()
+addMathBit (Math () mbs) mb = Math () (mbs S.|> mb)
+
+addMathLua :: Math () -> KaiLua () -> LP (Math ())
+addMathLua m l = do
+    r <- newLua l
+    return $ addMathBit m (MathLua () r)
+
 withTypingArgs as [] = as
 withTypingArgs (Args () (ExpressionList () es)) tas = Args () . ExpressionList () $ es ++ map (PrefixExp () . PrefixFunCall ()) tas
 withTypingArgs (ArgsTable () t) tas = Args () . ExpressionList () $ TableCtor () t : map (PrefixExp () . PrefixFunCall ()) tas
 withTypingArgs (ArgsString () s) tas = Args () . ExpressionList () $ String () s : map (PrefixExp () . PrefixFunCall ()) tas
-
-addBit (bs, ls) b = (b S.<| bs, ls)
-addLua (bs, ls) lua = (TypingLua () (LuaRef $ S.length ls) S.<| bs, ls S.|> lua)
-addMath (bs, ls) m = let (mbs, mls) = m (S.length ls) in (TypingMath () (Math () mbs) S.<| bs, ls S.>< mls)
-
-typingify :: (S.Seq (TypingBit ()), S.Seq (KaiLua ())) -> LP (Lua.FunctionCall ())
-typingify (bs, ls) = do
-    sts <- gets subtypings
-    let ref = length sts
-        args = fmap mkArg ls
-    modify' $ \st -> st { subtypings = sts S.|> (Typing () bs) }
-    return (mkTypingCall ref args)
-  where
-    mkArg (Call _ fc) = PrefixExp () (PrefixFunCall () fc)
-    mkArg (Block _ b) = 
-        PrefixExp () (
-            PrefixFunCall () (
-                FunctionCall () (
-                    Parens () (
-                        FunDef () (
-                            FunctionBody () (IdentList () []) False b
-                        )
-                    )
-                ) ( 
-                    Args () (ExpressionList () [])
-                )
-            )
-        )
-    mkTypingCall r as =
-        FunctionCall () (
-            PrefixVar () (VarFieldName () (PrefixVar () (VarIdent () (Ident () "__Kai"))) (Ident () "typing")))
-            (Args () (ExpressionList () ((Integer () (show r)) : F.toList as)))
-
-addMathBit math mathbit l = (mb S.<| mbs, mbls S.>< mbsls)
-  where 
-    (mb, mbls) = mathbit l
-    (mbs, mbsls) = math (l + S.length mbls)
-addMathLua m lua l = let (bs, ls) = m l in (MathLua () (LuaRef $ S.length ls) S.<| bs, ls S.|> lua)
 
 blockAdd (Lua.Block x ss mr) s = Lua.Block x (s:ss) mr
 withElse (If x is me) e = If x is (Just e)

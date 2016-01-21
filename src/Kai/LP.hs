@@ -8,7 +8,7 @@ import Control.Monad.State
 import Control.Monad.Except
 
 import qualified Language.Lua.Token as Lua
-import qualified Language.Lua.Syntax as Lua
+import Language.Lua.Syntax hiding (Block)
 import qualified Language.Lua.Parser as Lua
 
 import qualified Data.ByteString.Lazy as BS
@@ -18,6 +18,7 @@ import Data.Word (Word8)
 import Data.Int (Int64)
 
 import qualified Data.Sequence as S
+import qualified Data.Foldable as F
 
 import Data.Loc
 
@@ -47,7 +48,8 @@ prettyCompileMsg m src = case msgLocation m of
 data Token 
   = TkLua Lua.Token
   | TkChar BS.ByteString
-  | TkInline (Lua.FunctionCall ())
+  | TkInline (FunctionCall ())
+  | TkTyping (FunctionCall ())
   | TkNewPar
   | TkSpace
   | TkSymbol BS.ByteString
@@ -60,7 +62,6 @@ data LPState = LPState
   , currentSC :: !SC
   , pathSC :: [SC]
   , accumTokens :: S.Seq (L Token)
-  , subtypings :: S.Seq (Typing ())
   }
     deriving (Show, Eq)
 
@@ -69,10 +70,67 @@ initialLPState = LPState
   , currentSC = 0
   , pathSC = []
   , accumTokens = S.empty
-  , subtypings = S.empty
   }
 
-newtype LP a = LP { unLP :: ExceptT CompileMsg (State LPState) a }
+data Builder a = Builder { runBuilder :: S.Seq (KaiLua ()) -> Int -> (a, S.Seq (KaiLua ()), S.Seq (Typing ())) }
+instance Functor Builder where
+    fmap f (Builder tb) = Builder $ \luas tCount -> 
+        let (x, luas', typings) = tb luas tCount in (f x, luas', typings)
+instance Applicative Builder where
+    pure x = Builder $ \luas _ -> (x, luas, S.empty)
+    Builder tbf <*> Builder tbx = Builder $ \luas tCount ->
+        let (f, luas', typings) = tbf luas tCount
+            (x, luas'', typings') = tbx luas' (tCount + S.length typings)
+        in (f x, luas'', typings S.>< typings')
+instance Monad Builder where
+    return = pure
+    Builder tbx >>= f = Builder $ \luas tCount ->
+        let (x, luas', typings) = tbx luas tCount
+            Builder tby = f x
+            (y, luas'', typings') = tby luas' (tCount + S.length typings)
+        in (y, luas'', typings S.>< typings')
+
+getArgs :: LP (S.Seq (KaiLua ()), Int)
+getArgs = LP . lift . lift . Builder $ \luas tCount -> ((luas, tCount), luas, S.empty)
+
+insertArgs :: (S.Seq (KaiLua ()), Int) -> LP a -> LP a
+insertArgs (luas, tCount) (LP e) = do
+    lpSt <- get
+    let s = runExceptT e
+        b = runStateT s lpSt
+        ((ex, st), ls, ts) = runBuilder b luas tCount
+    LP . ExceptT . StateT $ \_ -> Builder $ \_ _ -> ((ex,st),ls,ts)
+
+newLua :: KaiLua () -> LP LuaRef
+newLua l = LP . lift . lift . Builder $ \luas _ -> (LuaRef (S.length luas), luas S.|> l, S.empty)
+
+makeCall :: Typing () -> LP (FunctionCall ())
+makeCall t = LP . lift . lift . Builder $ \luas tCount ->
+    let args = mkArg <$> luas
+    in (mkTypingCall tCount args, S.empty, S.singleton t)
+  where
+    mkArg (Call _ fc) = PrefixExp () (PrefixFunCall () fc)
+    mkArg (Block _ b) = 
+        PrefixExp () (
+            PrefixFunCall () (
+                FunctionCall () (
+                    Parens () (
+                        FunDef () (
+                            FunctionBody () (IdentList () []) False b
+                        )
+                    )
+                ) ( 
+                    Args () (ExpressionList () [])
+                )
+            )
+        )
+    mkTypingCall r as =
+        FunctionCall () (
+            PrefixVar () (VarFieldName () (PrefixVar () (VarIdent () (Ident () "__Kai"))) (Ident () "typing")))
+            (Args () (ExpressionList () ((Integer () (show r)) : F.toList as)))
+    
+
+newtype LP a = LP { unLP :: ExceptT CompileMsg (StateT LPState Builder) a }
 
 instance Functor LP where
     fmap f (LP m) = LP (fmap f m)
@@ -87,16 +145,22 @@ instance MonadState LPState LP where
     put = LP . put
 instance MonadError CompileMsg LP where
     throwError = LP . throwError
-    catchError (LP m) f = LP (catchError m (unLP . f))
+    catchError (LP m) f = do
+        st <- get
+        as <- getArgs
+        let d e = unLP $ insertArgs as (f e)
+        LP (catchError m (\e -> do
+            put st 
+            d e))
 
 runLP :: LP a -> SC -> BS.ByteString -> Either CompileMsg (a, S.Seq (Typing ()))
-runLP (LP e) sc inp = do
-    x <- a
-    return (x, subtypings s)
-  where (a,s) = runState (runExceptT e) (initialLPState { sourceFeed = emptyFeed { feedData = inp }, currentSC = sc })
-
-runLPList :: LP a -> SC -> [L Token] -> Either CompileMsg a
-runLPList (LP e) sc ts = evalState (runExceptT e) (initialLPState { accumTokens = S.fromList ts })
+runLP (LP e) sc inp = 
+    let st = runExceptT e
+        b = evalStateT st (initialLPState { sourceFeed = emptyFeed { feedData = inp }, currentSC = sc })
+        (ex, l, ts) = runBuilder b S.empty 0
+    in do
+        x <- ex
+        return (x,ts)
 
 lpErr :: BS.ByteString -> LP a
 lpErr d = do
