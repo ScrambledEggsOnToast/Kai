@@ -18,6 +18,7 @@ import Data.List (foldl1')
 import qualified Data.Foldable as F
 
 import Data.Loc
+import Data.Monoid ((<>))
 
 import Data.Sequence ((|>),(<|), ViewL(..), ViewR(..))
 import qualified Data.Sequence as S
@@ -35,8 +36,8 @@ $large      = [A-Z \xc0-\xd6 \xd8-\xde]
 $small      = [a-z \xdf-\xf6 \xf8-\xff \_]
 $alpha      = [$small $large]
 
-@luaname    = [$alpha \_] [$alpha $digit \_]+
-@inlinename = [$alpha] [$alpha $digit]+
+@luaname    = [$alpha \_] [$alpha $digit \_]*
+@inlinename = [$alpha] [$alpha $digit]*
 
 @exponent   = [Ee] ("+" | "-")? $digit+
 @hexponent  = [Pp] ("+" | "-")? $hex+
@@ -126,8 +127,8 @@ kai :-
 <lua, paren, brace, bracket>            "~="                    { mkT $ TkLua Lua.TkNeq }
 <lua, paren, brace, bracket>            "<="                    { mkT $ TkLua Lua.TkLeq }
 <lua, paren, brace, bracket>            ">="                    { mkT $ TkLua Lua.TkGeq }
-<lua, paren, brace, bracket, func>      "<" / $nl               { descend typing (mkT $ TkLua Lua.TkLt) }
-<lua, paren, brace, bracket, func>      "<"                     { handleLAngle }
+<lua, paren, brace, bracket, func>      "<" / $nl               { handleLAngle typing }
+<lua, paren, brace, bracket, func>      "<"                     { handleLAngle typingshort }
 <lua, paren, brace, bracket>            ">"                     { mkT $ TkLua Lua.TkGt }
 <lua, paren, brace, bracket>            "="                     { mkT $ TkLua Lua.TkAssign }
 <lua, paren, brace, bracket, func>      "("                     { descend paren (mkT $ TkLua Lua.TkLParen) }
@@ -201,10 +202,10 @@ scanAll = F.toList <$> go S.empty
             L _ TkEOF -> return (ts |> t)
             _ -> go (ts |> t)
 
-handleLAngle :: LexerAction
-handleLAngle feed len = do
+handleLAngle :: SC -> LexerAction
+handleLAngle sc feed len = do
     st <- get
-    put $ st { pathSC = [currentSC st], currentSC = typingshort }
+    put $ st { pathSC = [currentSC st], currentSC = sc }
     (do
         ts <- getTs S.empty
         st' <- get
@@ -250,7 +251,7 @@ scanNormal = do
     sc <- gets currentSC
     case alexScan feed sc of
         AlexEOF -> return $ L NoLoc TkEOF
-        AlexError feed' -> lpErr "Unexpected character"
+        AlexError feed' -> lpErr $ "Unexpected character (startcode = " <> C8.pack (show sc) <> ")"
         AlexSkip feed' len -> do
             modify' $ \st -> st { sourceFeed = feed' }
             scan

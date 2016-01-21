@@ -127,7 +127,7 @@ import qualified Text.PrettyPrint.Leijen as PP
 
 -- Kai
 
-Typing          : Typing1                                           {% makeCall $1 }
+Typing          : Typing1                                           {% trace "yo" $ makeCall $1 }
 
 Typing1         : {- empty -}                                       { Typing () S.empty }
                 | Typing1 Typingbit                                 { $1 `addBit` $2 }

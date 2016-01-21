@@ -13,6 +13,7 @@ import qualified Language.Lua.Parser as Lua
 
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as C8
+import qualified Data.ByteString.Lazy.UTF8 as U
 import Data.Word (Word8)
 
 import Data.Int (Int64)
@@ -22,7 +23,7 @@ import qualified Data.Foldable as F
 
 import Data.Loc
 
-import Text.PrettyPrint
+import qualified Text.PrettyPrint.Leijen as PP
 
 type SC = Int
 
@@ -30,18 +31,18 @@ data CompileMsg = CompileMsg { msgLocation :: Loc, msgDescription :: BS.ByteStri
     deriving (Show, Eq)
 emptyCompileMsg = CompileMsg { msgLocation = NoLoc, msgDescription = "" }
 
-prettyCompileMsg :: CompileMsg -> BS.ByteString -> Doc
+prettyCompileMsg :: CompileMsg -> BS.ByteString -> PP.Doc
 prettyCompileMsg m src = case msgLocation m of 
-    NoLoc -> text (C8.unpack (msgDescription m))
+    NoLoc -> PP.text (U.toString (msgDescription m))
     l@(Loc (Pos f l1 c1 o1) (Pos _ _ c2 o2)) -> 
         let padding = 5
             paddingStart = min c1 padding
-        in hcat
-            [ text $ displayLoc l, text ": "
-            , text $ C8.unpack (msgDescription m), text ": "
-            , nest 3 . vcat $
-                [ text $ C8.unpack . C8.takeWhile (/='\n') . C8.take (fromIntegral $ o2 - o1 + 1 + padding + paddingStart) . C8.drop (fromIntegral $ o1 - padding) $ src
-                , nest paddingStart . text $ replicate (o2-o1+1) '~'
+            pretext = displayLoc l ++ ": " ++ U.toString (msgDescription m) ++ ": "
+        in PP.hcat
+            [ PP.text pretext
+            , PP.nest (length pretext) . PP.vcat $
+                [ PP.text $ U.toString . head . U.lines . U.take (fromIntegral $ o2 - o1 + 1 + padding + paddingStart) . U.drop (fromIntegral $ o1 - padding) $ src
+                , PP.text $ replicate paddingStart ' ' ++ replicate (o2-o1+1) '~'
                 ]
             ]
 
